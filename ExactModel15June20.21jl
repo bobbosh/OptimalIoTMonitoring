@@ -1,0 +1,182 @@
+#using Graphs
+using JuMP
+using Gurobi
+using LightGraphs
+#using GraphPlot
+#using Compose	
+#using Colors
+
+
+
+ExactModel = Model(solver=GurobiSolver())
+#parameters
+numVertices = 9;
+numPeriods = 4;
+e_m = 2;
+e_c = 1;
+e_tr_sleep = 0.0001;
+e_tr_active =0.0005;
+
+
+"""
+*graphname*
+Currently, `graphname` can be one of ["karate", "football", "dolphins",
+"netscience", "polbooks", "power", "cond-mat"]
+"""
+
+DODAG = Graph(); 
+#graph_Edge = [1 2; 1 3; 1 4; 1 5; 1 6; 1 7; 1 8; 1 9; 1 10; 2 11; 2 12; 2 13; 2 14; 3 15; 3 16 ; 3 17; 3 18; 4 19; 4 20; 4 21; 4 22; 5 6; 5 23; 5 24; 5 25; 5 26 ;6 7; 6 27; 6 28; 6 29; 6 30; 7 8; 7 31; 7 32; 7 33; 7 34; 8 9; 8 35; 8 36; 8 37; 8 38; 9 10 ; 10 49; 11 12; 11 52; 11 69; 12 13; 12 39; 13 14; 14 15; 14 39; 15 16; 16 39; 16 40; 18 40;19 25; 19 40; 23 25; 27 42; 30 31; 30 42; 31 42; 31 43; 32 44; 32 46; 34 46; 36 47; 38 48; 39 63; 39 52; 39 40; 40 26; 40 61; 40 62; 41 26; 41 50; 42 26; 42 54; 43 44; 43 54; 43 56; 43 57; 44 45; 45 46; 45 58; 46 58; 46 59; 47 59; 48 49; 48 59; 48 60; 52 53; 52 69; 51 64; 53 63; 53 69; 53 70; 62 50; 63 68; 50 51; 50 55; 50 68; 54 55; 54 67; 55 65; 55 66; 57 67; 58 72; 70 71; 70 72; 71 72; 74 75; 75 76; 77 78; 78 79; 80 81; 80 83; 87 88; 88 89; 90 91; 91 92; 92 93; 93 94 ;94 95;94 95;98 99; 99 100]
+graph_Edge = [1 2; 1 3; 1 5; 2 4; 2 5; 3 6; 4 5; 4 7; 5 6; 5 7; 6 7]
+#DODAG=graphfamous("karate")	
+#DODAG=graphfamous("football")	
+#DODAG=graphfamous("dolphins")	
+#DODAG=graphfamous("netscience")	
+#DODAG=graphfamous("polbooks")	
+#DODAG=graphfamous("power")	
+#DODAG=graphfamous("cond-mat")	
+
+
+DODAGDirected = DiGraph(DODAG);
+add_vertices!(DODAG, numVertices)
+add_vertices!(DODAGDirected, numVertices)
+
+numEdges = ne(DODAG)
+numVertices=nv(DODAG)
+#R.H.S
+reservedBattery = Array{Int}(numVertices)
+fill!(reservedBattery, 60)
+
+
+for i=1:size(graph_Edge,1)
+	add_edge!(DODAG,graph_Edge[i,1],graph_Edge[i,2])
+	add_edge!(DODAGDirected,graph_Edge[i,1],graph_Edge[i,2])
+end
+
+nodelabel = Array{Int}(numVertices)
+for k =1:numVertices
+	nodelabel[k] = k
+end
+
+# save to png
+#draw(PNG("DODAG_Toy.png", 20cm, 20cm), gplot(DODAG,nodelabel=nodelabel))
+#draw(PNG("DODAGDirected_8.png", 16cm, 16cm), #gplot(DODAGDirected,nodelabel=nodelabel))
+
+"""
+decision variables
+
+we define a binary DV xmij, which equals one if vertex vi is #assigned to monitor a period Tj and zero otherwise (1)
+
+we define a binary DV xrij, which equals one if vertex vi acts #as a relay node in period Tj and zero otherwise (2)
+
+we define a binary auxiliary variable y_aij, which equals one if vertex vi is asleep in period Tj and active in Tj+1 (3)
+we define a binary auxiliary variable y_sij, which equals one if vertex vi is active in period Tj and asleep in Tj+1 (4)
+"""
+
+@variable(ExactModel, xm[i=1:numVertices, j=1:numPeriods], Bin)
+@variable(ExactModel, xr[i=1:numVertices, j=1:numPeriods], Bin)
+@variable(ExactModel, y_a[i=1:numVertices, j=1:numPeriods], Bin)
+@variable(ExactModel, y_s[i=1:numVertices, j=1:numPeriods], Bin)
+
+
+"""
+@expression
+efficiently builds a linear, quadratic, or second-order cone expression but does not add to model immediately. Instead, returns the expression which can then be inserted in other constraints.
+
+Constraint: slot to be assigned once (eq. 19 in the paper)
+"""
+
+for j=1:numPeriods
+	@expression(ExactModel, sumMonitoring, sum(xm[i,j] for i=1:numVertices));
+	@constraint(ExactModel, sumMonitoring  >= 1);
+end
+
+
+"""
+Vertex Cover Constraints
+for each edge, in each time period, add a constraint to make sure that for each edge of the DODAG one or both end points are in the VC (7)
+"""
+for e in edges(DODAG)
+	for j=1:numPeriods
+		u,v = src(e), dst(e)
+		println("edge $u - $v")
+		@constraint(ExactModel,xm[u,j] + xm[v,j] >=1)
+	end
+end
+
+
+"""
+connectivity constraints (8)
+"""
+for v in vertices(DODAGDirected) 
+	if v == 1
+		continue
+	end
+	array = inneighbors(DODAGDirected,v)
+	println("parents of vertex $v are $array")
+	#if the node has no parent, add an edge between this node 	#and the root
+	if try isempty(array) end == true
+		p = rand(1:numVertices)
+		add_edge!(DODAG,p,v)
+		add_edge!(DODAGDirected,p,v)
+		array = inneighbors(DODAGDirected,v);
+		println("after parents of vertex $v are $array");
+	end	
+	for j=1:numPeriods
+		@expression(ExactModel,parents_mon, sum(xm[i,j] for i in array ))
+			@expression(ExactModel,parents_relay, sum(xr[i,j] for i in array ))
+			@constraint(ExactModel, xr[v,j] <= parents_mon + parents_relay )
+	end
+end
+
+"""
+Auxiliary constraints (10) and (11)
+"""
+for i in vertices(DODAG)
+	for j =1:numPeriods-1
+		@constraint(ExactModel,xm[i,j]-xm[i,j]*xm[i,j+1] == y_s[i,j])
+
+		@constraint(ExactModel,xm[i,j+1]-xm[i,j]*xm[i,j+1] == y_a[i,j])
+	end 
+end
+
+
+
+#Capacity Constraint (battery) for all nodes(i) (6)
+for i=1:numVertices
+	@expression(ExactModel, monitoring,   sum(e_m *xm[i,j] for j=1:numPeriods))
+	@expression(ExactModel, relay,   sum(e_c *xr[i,j] for j=1:numPeriods))
+	@constraint(ExactModel, monitoring + relay  <=reservedBattery[i])
+end
+
+
+#Objective function (5)
+@expression(ExactModel, Mon_obj,sum(e_m*xm[i,j] for i=1:numVertices for j=1:numPeriods));
+@expression(ExactModel, Com_obj,sum(e_c*xr[i,j] for i=1:numVertices for j=1:numPeriods));
+@expression(ExactModel, sleep_trans_obj,sum(e_tr_sleep*y_s[i,j] for i=1:numVertices for j=1:numPeriods));
+@expression(ExactModel, active_trans_obj,sum(e_tr_active*y_a[i,j] for i=1:numVertices for j=1:numPeriods));
+@objective(ExactModel, Min, Mon_obj + Com_obj +sleep_trans_obj +active_trans_obj);
+	
+solve(ExactModel)
+println("x_mij = ", getvalue(xm))
+println("x_rij = ", getvalue(xr))
+println("y_sij = ", getvalue(y_s))
+println("y_aij = ", getvalue(y_a))
+println("Objective value: ", getobjectivevalue(ExactModel))
+
+#distinguish between node colors according their roles
+#diffcolors = distinguishable_colors(4)
+#nodefillc = distinguishable_colors(numVertices)
+#for j=1:numPeriods
+#	for i=1:numVertices
+#		if getvalue(xm[i,j])==1
+#			nodefillc[i] = diffcolors[2]
+#		else
+ #			nodefillc[i]=diffcolors[3]
+	#	end
+	#	if getvalue(xr[i,j])==1
+ 	#		nodefillc[i]=diffcolors[4]
+	#	end
+	#end
+	#draw(PNG("DODAGToy_period$j.png", 20cm, 20cm), 	gplot(DODAG,nodefillc=nodefillc, nodelabel=nodelabel, 	nodelabeldist=0, nodelabelangleoffset=pi/2))
+#end
+
